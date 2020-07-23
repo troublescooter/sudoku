@@ -40,32 +40,65 @@ impl<T: Clone + Default> Sudoku<T> {
     fn rows(&self) -> impl DoubleEndedIterator<Item = impl DoubleEndedIterator<Item = &'_ T>> {
         self.0.chunks(9).map(|chunk| chunk.iter())
     }
-    fn blocks(&self) -> impl DoubleEndedIterator<Item = impl DoubleEndedIterator<Item = &'_ T>> {
+    fn blocks(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = impl DoubleEndedIterator<Item = (usize, &'_ T)>> {
         // fn blocks(&self) -> Vec<&T> {
         let index = vec![0, 1, 2, 9, 10, 11, 18, 19, 20];
         let mut index_rev: Vec<_> = index.iter().rev().collect();
-        let enumerated_chunks: Vec<(usize, &[T])> = self
-            .0
+        let n = 0;
+        self.0
             .chunks(3)
-            .enumerate()
+            // .enumerate()
             // Some((usize,&[T]))
-            .map(|(n,slice)| repeat(n).zip(slice.iter()))
-            .scan(vec![], |visited, &(n, x)| {
-                let i = index_rev.pop().expect("There should be enough elements!");
-                visited.drain_filter(|&(en,elt)|  *en == i || *en == i + 3 || *en == i + 6)
-            });
-        let mut blocks = vec![];
-        for &i in index.iter() {
-            blocks.push(
-                enumerated_chunks
-                    .iter()
-                    .filter(|&(n, chunk)| *n == i || *n == i + 3 || *n == i + 6)
-                    .map(|(_, chunk)| *chunk)
-                    .collect::<Vec<_>>(),
-            )
-        }
+            .map(|slice|
+                 few(n,3).zip(
+                     // once(n).zip(
+                 slice.iter())
+    )
+        // .scan(vec![], |visited, &(n, x)| {
+        //     let i = index_rev.pop().expect("There should be enough elements!");
+        //     visited.drain_filter(|&(en,elt)|  *en == i || *en == i + 3 || *en == i + 6)
+        // });
+    }
+}
 
-        blocks
+struct Few<T> {
+    amount: usize,
+    counter: usize,
+    element: T,
+    // _marker: std::marker::PhantomData<&'a T>,
+}
+
+impl<T: Copy> Iterator for Few<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.counter < self.amount {
+            self.counter += 1;
+            Some(self.element)
+        } else {
+            None
+        }
+    }
+}
+impl<T: Copy> DoubleEndedIterator for Few<T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.counter < self.amount {
+            self.counter += 1;
+            Some(self.element)
+        } else {
+            None
+        }
+    }
+}
+
+fn few<T: Copy>(element: T, amount: usize) -> impl Iterator<Item = T> {
+    Few {amount, counter: 0, element}
+}
+
+impl<T: Copy> ExactSizeIterator for Few<T> {
+    fn len(&self) -> usize {
+        self.amount - (self.counter + 1)
     }
 }
 
