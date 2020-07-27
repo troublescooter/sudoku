@@ -1,5 +1,7 @@
 #![allow(dead_code)]
+#![allow(unused_imports)]
 #![feature(drain_filter)]
+#![feature(trait_alias)]
 use std::iter::{once, repeat};
 #[derive(Debug, Clone, PartialEq)]
 enum Entry {
@@ -19,129 +21,110 @@ impl Default for Entry {
         Entry::Possible(vec![])
     }
 }
-trait CompleteIterator<S> {}
-impl<S, T: DoubleEndedIterator<Item = S> + ExactSizeIterator<Item = S>> CompleteIterator<S> for T {}
-// type DoubleExact<T> = DoubleSidedIterator<Item= >
+trait CompleteIterator<S> = DoubleEndedIterator<Item = S> + ExactSizeIterator<Item = S>;
+trait Row<S> = DoubleEndedIterator<Item = S> + ExactSizeIterator<Item = S>;
+type EnumeratedSlice<'a, T> = (usize, &'a Vec<T>);
+type EnumeratedSliceMut<'a, T> = (usize, &'a mut Vec<T>);
+type Block<T> = Vec<T>;
+// type Block<'a, T> = Vec<&'a T>;
+
+trait ThreeBlocks<T> = Iterator<Item = T>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct Sudoku<T>(Vec<T>);
+struct Sudoku<T>(Vec<Vec<T>>);
 
-impl<T: Clone + Default> Sudoku<T> {
-    fn new() -> Self {
-        Sudoku(vec![T::default(); 81])
-    }
-    fn from(entries: Vec<T>) -> Self {
-        assert_eq!(entries.len(), 81);
+impl<T: Clone + Default + std::fmt::Debug> Sudoku<T> {
+    fn from(entries: Vec<Vec<T>>) -> Self {
+        // assert_eq!(entries.len(), 81);
         Sudoku(entries)
     }
-    fn iter(&self) -> impl DoubleEndedIterator<Item = &'_ T> {
-        self.0.iter()
-    }
-    fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &'_ mut T> {
-        self.0.iter_mut()
-    }
-    fn rows(&self) -> impl DoubleEndedIterator<Item = impl DoubleEndedIterator<Item = &'_ T>> {
-        self.0.chunks(9).map(|chunk| chunk.iter())
-    }
-    // fn blocks(&self) -> impl DoubleEndedIterator<Item = impl CompleteIterator<(usize, &'_ T)>> {
-    //     // fn blocks(&self) -> Vec<&T> {
-    //     let index = vec![0, 1, 2, 9, 10, 11, 18, 19, 20];
-    //     let mut index_rev: Vec<_> = index.iter().rev().collect();
-    //     self.0
-    //         .chunks(27)
-    //         .enumerate()
-    //         // (usize,&[T])
-    //         .scan(
-    //             // (visited chunks on a stack, current index to filter the chunks by)
-    //             (vec![],(()index_rev.pop().unwrap()))
-    //                 ,|(visited,index), (counter,slice)| {
-    //                     visited.push(slice);
-    //                     let iter =visited.drain_filter(|elt|  counter == **index || counter == **index + 3 || counter == **index + 6);
-    //                     *index = index_rev.pop().unwrap();
-    //                     Some(iter)
-    //                 }
-    //         )
-
-    // .map(|(counter, slice)| {
-    //     few(counter, 3).zip(
-    //         slice.iter(),
-    //     )
-    // })
-    // every iter
-    // (iter((usize,&T)))
-    // .scan(vec![], |visited, &(n, x)| {
-    //     let i = index_rev.pop().expect("There should be enough elements!");
-    //     visited.drain_filter(|&(en,elt)|  *en == i || *en == i + 3 || *en == i + 6)
-    // });
-    // }
-    fn blocks(&self) -> impl Iterator<Item = impl Iterator<Item = &'_ T>> {
-        // let remove = |t,visited: &mut Vec<(_,_)>| // -> ()
-        // {
-        //     let removed: Vec<_> = visited.drain_filter(|(&n,_)| n == t || n == t + 3 || n== t+6 ).collect();
-        //     removed.into_iter().map(|(_,slice)| slice)
-        // };
+    fn rows(
+        &self,
+    ) -> impl ExactSizeIterator<Item = impl Row<&'_ T>> + DoubleEndedIterator<Item = impl Row<&'_ T>>
+    {
         self.0
-            .chunks(27)
-            // three_whole_blocks
-            .map(|three_blocks| {
-                three_blocks
-                    .chunks(3)
-                    .enumerate()
-                    .scan(vec![], |visited, (counter, slice)| {
-                        visited.push((counter, slice));
-                        if counter < 8 {
-                            None
-                        } else {
-                            let iter = once(removed(0, visited))
-                                .chain(once(removed(1, visited)))
-                                .chain(once(removed(2, visited)));
-                            // let t = counter - 6;
-                            Some(iter)
-                        }
-                    })
-                    .flatten()
+            .chunks(3)
+            .map(|chunk| exactly(chunk.iter().flatten(), 9))
+    }
+    fn rows_mut(
+        &mut self,
+    ) -> impl ExactSizeIterator<Item = impl Row<&'_ mut T>>
+           + DoubleEndedIterator<Item = impl Row<&'_ mut T>> {
+        self.0
+            .chunks_mut(3)
+            .map(|chunk| exactly(chunk.iter_mut().flatten(), 9))
+    }
+    fn three_block_chunks(&self) -> impl Iterator<Item = impl ThreeBlocks<EnumeratedSlice<'_, T>>> {
+        self.0
+            .chunks(9)
+            // &[Vec<T;3>;9]
+            .map(|chunk| chunk.iter().enumerate())
+    }
+    fn three_block_chunks_mut(
+        &mut self,
+    ) -> impl Iterator<Item = impl ThreeBlocks<EnumeratedSliceMut<'_, T>>> {
+        self.0
+            .chunks_mut(9)
+            // &[Vec<T;3>;9]
+            .map(|chunk| chunk.iter_mut().enumerate())
+    }
+    fn blocks(&self) -> impl Iterator<Item = Block<&'_ T>> {
+        // Iter<Item = Iter<Item = (usize, &Vec<T; 3>); 3>; ?>
+        self.three_block_chunks()
+            // Iter<Item = (usize, &Vec<T; 3>); 9>
+            // maps every chunk to an iterator over blocks
+            .map(|enum_chunk| {
+                Iter::new(enum_chunk.scan(vec![], |visited, (counter, slice)| {
+                    visited.push((counter, slice));
+                    if counter != 8 {
+                        None
+                    } else {
+                        let iter = once(remove_any(&[0, 3, 6], visited))
+                            .chain(once(remove_any(&[1, 4, 7], visited)))
+                            .chain(once(remove_any(&[2, 5, 8], visited)));
+                        Some(iter)
+                    }
+                }))
+                .step_by(8)
+                .skip(1)
             })
+            .flatten()
+            .flatten()
+    }
+    fn blocks_mut(&mut self) -> impl Iterator<Item = Block<&'_ mut T>> {
+        // Iter<Item = Iter<Item = (usize, &Vec<T; 3>); 3>; ?>
+        self.three_block_chunks_mut()
+            // Iter<Item = (usize, &Vec<T; 3>); 9>
+            // maps every chunk to an iterator over blocks
+            .map(|enum_chunk| {
+                Iter::new(enum_chunk.scan(vec![], |visited, (counter, slice)| {
+                    visited.push((counter, slice));
+                    if counter != 8 {
+                        None
+                    } else {
+                        let iter = once(remove_any(&[0, 3, 6], visited))
+                            .chain(once(remove_any(&[1, 4, 7], visited)))
+                            .chain(once(remove_any(&[2, 5, 8], visited)));
+                        Some(iter)
+                    }
+                }))
+                .step_by(8)
+                .skip(1)
+            })
+            .flatten()
             .flatten()
     }
 }
 
-fn collect_into_blocks<T: std::fmt::Debug>(
-    three_whole_blocks: &[T],
-    // ) -> impl Iterator<Item = impl Iterator<Item = &'_ T>> {
-) -> impl Iterator<Item = impl Iterator<Item = impl Iterator<Item = &'_ T>>> {
-    // let remove = |t,visited: &mut Vec<(_,_)>| // -> ()
-    // {
-    //     let removed: Vec<_> = visited.drain_filter(|(&n,_)| n == t || n == t + 3 || n== t+6 ).collect();
-    //     removed.into_iter().map(|(_,slice)| slice)
-    // };
-    three_whole_blocks
-        .chunks(3)
-        .enumerate()
-        .scan(vec![], |visited, (counter, slice)| {
-            visited.push((counter, slice));
-            if counter < 8 {
-                None
-            } else {
-                let iter = once(removed(0, visited))
-                    .chain(once(removed(1, visited)))
-                    .chain(once(removed(2, visited)));
-                // let t = counter - 6;
-                Some(iter)
-            }
-        })
-    // .map(|elt| elt.map(|x| dbg!(x)))
-    // .map(|iter|iter.flatten())
-    // .flatten()
-}
-fn removed<'a, T>(
-    t: usize,
-    visited: &mut Vec<(usize, &'a [T])>,
-) -> impl DoubleEndedIterator<Item = &'a T> {
-    // let remove = |t,visited: &mut Vec<(_,_)>| // -> ()
-    let removed: Vec<_> = visited
-        .drain_filter(|(n, _)| *n == t || *n == t + 3 || *n == t + 6)
-        .collect();
-    removed.into_iter().map(|(_, slice)| slice.iter()).flatten()
+fn remove_any<'a, T: 'a, H: IntoIterator<Item = T>>(
+    t: &[usize],
+    visited: &mut Vec<(usize, H)>,
+) -> Block<T> {
+    visited
+        .drain_filter(|(n, _)| t.iter().any(|elt| elt == n))
+        .map(|(_, slice)| slice.into_iter())
+        .flatten()
+        .collect::<Vec<_>>()
 }
 
 fn consume<T, I: Iterator<Item = T>>(amount: usize, mut iter: I) -> Vec<Option<T>> {
@@ -154,53 +137,48 @@ fn consume<T, I: Iterator<Item = T>>(amount: usize, mut iter: I) -> Vec<Option<T
 
 fn main() {}
 
-fn recursive_consume<T, I: Iterator<Item = T>>(
-    to_consume: Vec<Option<I>>,
-) -> Vec<Option<Vec<Option<T>>>> {
-    to_consume
-        .into_iter()
-        .map(|maybe_iter| maybe_iter.map(|iter| consume(3, iter)))
-        .collect::<Vec<_>>()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #[test]
+    // fn test_unstable() {
+    //     let mut unstable = Flaky::new();
+    //     // dbg!(unstable.next());
+    //     // dbg!(unstable.next());
+    //     let mut skip = unstable.skip(1);
+    //     dbg!(skip.next());
+    //     dbg!(skip.next());
+    // }
     #[test]
     fn test_iterator_blocks() {
         let default: Vec<u8> = (1..=81).collect();
-        // let s = Sudoku::from(default);
-        // let mut visited = vec![];
-        // let mut blocks = s.blocks();
-        let three_blocks: Vec<_> = (1..=27).collect();
-        let v = consume(3,collect_into_blocks(&three_blocks).map(|iter|consume(19,iter.map(|iter2|consume(13,iter2)))));
-        dbg!(v);
+        let vecvec = default
+            .chunks(3)
+            .map(|chunk| chunk.iter().cloned().collect::<Vec<_>>()) //;
+            .collect::<Vec<_>>();
+        let s = Sudoku::from(vecvec);
+        for block in s.blocks() {
+            dbg!(block);
+        }
+        // let mut enum_chunks = s.enum_chunks().collect::<Vec<_>>();
+        // let first: Vec<_> = enum_chunks.remove(0).collect();
+        // let mut potential_blocks = Iter::new(collect_into_blocks(first.iter().cloned()));
+        // for _ in 0..1 {
+        //     let blocks: Vec<_> = match potential_blocks.next() {
+        //         None => {
+        //             println!("None");
+        //             continue;
+        //         }
+        //         Some(blocks) => blocks.collect(),
+        //     };
+        //     // for block in blocks {
+        //     dbg!(blocks);
+        //     // }
+        // }
     }
 
-    // for three_whole_blocks in s.0.chunks(27) {
-    //     for (counter, slice_of_three) in three_whole_blocks.chunks(3).enumerate() {
-    //         visited.push((counter, slice_of_three));
-    //         if counter < 6 {
-    //             // return None;
-    //         } else {
-    //             let t = counter - 6;
-    //             let v: Vec<_> = removed(t, &mut visited).collect();
-    //             dbg!(v);
-    //         }
-    //     }
-    // visited.
-    // if counter < 6 {
-    //     // return None;
-    // } else {
-    //     let t = counter - 6;
-    //     let v : Vec<_>= removed(t,&mut visited).collect();
-    //     dbg!(v);
-    // }
-    // let collect_slices_of_three_into_blocks(s.0.chunks(27).map(|chunk| chunk.chunks(3)));
-    // for _ in 0..27 {
-
-    //     dbg!(elt);
-    // }
+    #[test]
+    fn test_block() {}
     // #[test]
     // fn test_valid_blocks() {
     //     let default: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -241,6 +219,7 @@ mod tests {
     // }
 }
 
+#[derive(Debug, Clone)]
 struct Few<T> {
     amount: usize,
     counter: usize,
@@ -275,5 +254,98 @@ fn few<T>(element: T, amount: usize) -> Few<T> {
 impl<T: Clone> ExactSizeIterator for Few<T> {
     fn len(&self) -> usize {
         self.amount - (self.counter + 1)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Exact<I> {
+    len: usize,
+    iter: I,
+}
+
+impl<I: Iterator> Iterator for Exact<I> {
+    type Item = <I as Iterator>::Item;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.len > 0 {
+            self.len -= 1;
+            self.iter.next()
+        } else {
+            None
+        }
+    }
+}
+impl<I: DoubleEndedIterator> DoubleEndedIterator for Exact<I> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.len > 0 {
+            self.len -= 1;
+            self.iter.next_back()
+        } else {
+            None
+        }
+    }
+}
+
+fn exactly<I: Iterator>(iter: I, len: usize) -> Exact<I> {
+    Exact { len, iter }
+}
+
+impl<I: Iterator> ExactSizeIterator for Exact<I> {
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+struct Flaky {
+    next: bool,
+}
+
+impl Flaky {
+    fn new() -> Self {
+        Flaky { next: false }
+    }
+}
+impl Iterator for Flaky {
+    type Item = ();
+    fn next(&mut self) -> Option<()> {
+        self.next = !self.next;
+        if !self.next {
+            Some(())
+        } else {
+            None
+        }
+    }
+    // fn nth(&mut self, mut n: usize) -> Option<Self::Item> {
+    //     loop {
+    //         let ret = self.next();
+    //         if n == 0 {
+    //             return ret;
+    //         }
+    //         n -= 1;
+    //     }
+    // }
+}
+
+struct Iter<I> {
+    iter: I,
+}
+
+impl<I: Iterator> Iter<I> {
+    fn new(iter: I) -> Self {
+        Iter { iter }
+    }
+}
+impl<I: Iterator> Iterator for Iter<I> {
+    type Item = <I as Iterator>::Item;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+    fn nth(&mut self, mut n: usize) -> Option<Self::Item> {
+        loop {
+            let ret = self.next();
+            if n == 0 {
+                return ret;
+            }
+            n -= 1;
+        }
     }
 }
