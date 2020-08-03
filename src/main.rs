@@ -1,8 +1,23 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
+use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::num::ParseIntError;
+use std::ops::Not;
 use thiserror::Error;
+
+fn which_block(idx: usize) -> usize {
+    let (row, col) = row_column(idx);
+    3 * (row / 3) + col / 3
+}
+fn which_row(idx: usize) -> usize {
+    let (row, _) = row_column(idx);
+    row
+}
+fn which_column(idx: usize) -> usize {
+    let (_, col) = row_column(idx);
+    col
+}
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 struct Cell(u16);
@@ -10,6 +25,75 @@ impl Default for Cell {
     fn default() -> Self {
         Self::new()
     }
+}
+
+enum Status {
+    Finished,
+    Continuing,
+}
+struct Choose {
+    n: usize,
+    status: Status,
+    init: u16,
+    mask: u16,
+    max_mask: u16,
+}
+
+impl Choose {
+    fn new(n: usize, init: u16) -> Self {
+        let max_mask = if init == 0 {
+            1u16 << (n - 1)
+        } else {
+            let mut shift = init;
+            let mut c = 0;
+            while shift >> 1 != 0 {
+                shift >>= 1;
+                c += 1;
+            }
+            1u16 << c
+        };
+        Choose {
+            n,
+            status: Status::Continuing,
+            max_mask,
+            mask: 1u16,
+            init,
+        }
+    }
+}
+
+impl Iterator for Choose {
+    type Item = u16;
+    fn next(&mut self) -> Option<u16> {
+        if let Status::Finished = self.status {
+            return None;
+        }
+        let maybe_flipped = self.mask | self.init;
+        if self.mask == self.max_mask {
+            self.status = Status::Finished;
+        };
+        self.mask <<= 1;
+        if maybe_flipped == self.init {
+            // didn't flip bit, proceed to next
+            self.next()
+        } else {
+            // did flip bit, return the result
+            Some(maybe_flipped)
+        }
+    }
+}
+
+// all possible bit combinations of choosing k bits being 1 out of the lower 9 from a u16
+fn choose(n: usize, k: usize) -> Box<dyn Iterator<Item = u16>> {
+    if k == 0 {
+        return Box::new(std::iter::once(0_u16));
+    }
+    Box::new(
+        std::iter::repeat(n)
+            .zip(choose(n, k - 1))
+            .map(|(n, bitmask)| Choose::new(n, bitmask))
+            .flatten(),
+    )
 }
 
 impl std::fmt::Display for Cell {
@@ -26,6 +110,29 @@ impl std::fmt::Debug for Cell {
             None => write!(dest, "{:b}", self.0),
             Some(val) => write!(dest, "{}", val),
         }
+    }
+}
+
+impl PartialOrd for Cell {
+    fn partial_cmp(&self, other: &Cell) -> Option<Ordering> {
+        let lhs = self.0;
+        let rhs = other.0;
+        if self == other {
+            return Some(Ordering::Equal);
+        }
+        if lhs & rhs == lhs {
+            return Some(Ordering::Less);
+        }
+        if lhs & rhs == rhs {
+            return Some(Ordering::Greater);
+        }
+        None
+    }
+}
+impl Not for Cell {
+    type Output = Cell;
+    fn not(self) -> Self {
+        Cell(!self.0)
     }
 }
 
@@ -71,49 +178,199 @@ impl Cell {
         Some(Value::new(n).expect("valid value; qed"))
     }
 }
+// if there exist exactly k cells that could contain any of k elements, then no other cell can contain these
+fn matches_rule1(n: usize, k: usize, row: Vec<&Cell>) -> Vec<Cell> {
+    let choose_k = choose(n, k).map(Cell);
+    choose_k
+        .map(|choice| {
+            (
+                choice,
+                row.iter().rev().try_fold(0usize, |acc, &elt| {
+                    if let Some(Ordering::Equal) = elt.partial_cmp(&&choice) {
+                        Some(acc + 1)
+                    } else {
+                        Some(acc)
+                    }
+                }),
+            )
+        })
+        .filter_map(|(cell, x)| match x {
+            Some(number) if number == k => Some(cell),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+}
+// output are the cells representing subsets S s.t.
+// \E C' subset Row : |S| = |C'| = k
+// /\ \A e in C' : Cell(S) subset e
+// /\ \A ec in Row \ C' : Cell(S) \cap ec == {}
+// so cells that representing k elements that can only be placed inside k fields in a row
+// all elements not in these k elements will be removed from every element in C'
+fn matches_rule2(n: usize, k: usize, row: Vec<&Cell>) -> Vec<Cell> {
+    let choose_k = choose(n, k).map(Cell);
+    choose_k
+        .map(|choice| {
+            (
+                choice,
+                row.iter().try_fold(0usize, |acc, &elt| {
+                    if let Some(Ordering::Equal) | Some(Ordering::Greater) =
+                        elt.partial_cmp(&&choice)
+                    {
+                        Some(acc + 1)
+                    } else if elt.0 & choice.0 != 0 {
+                        None
+                    } else {
+                        Some(acc)
+                    }
+                }),
+            )
+        })
+        .filter_map(|(cell, x)| match x {
+            Some(number) if number == k => Some(cell),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+}
 #[derive(Clone)]
 struct Sudoku([Cell; 81]);
 impl Sudoku {
+    fn solve_order(&mut self, k: usize) {
+        let mut patterns_per_row = vec![];
+        for row in self.rows() {
+            patterns_per_row.push(matches_rule1(9, k, row));
+        }
+        // println!("{:?}", patterns_per_row.pop());
+        for (row, pattern) in self.rows_mut().zip(patterns_per_row) {
+            for elt in row.into_iter().rev() {
+                for p in pattern.iter() {
+                    // remove all elements not in p1 from the elements that don't match p1
+                    if p != elt {
+                        *elt = Cell(elt.0 & !p.0);
+                    }
+                }
+            }
+        }
+        let mut patterns_per_row = vec![];
+        for row in self.rows() {
+            patterns_per_row.push(matches_rule2(9, k, row));
+        }
+        for (row, pattern) in self.rows_mut().zip(patterns_per_row) {
+            for elt in row.into_iter().rev() {
+                for p in pattern.iter() {
+                    // remove all other elements but the ones in pattern p2
+                    if p <= elt {
+                        *elt = Cell(elt.0 & p.0);
+                    }
+                }
+            }
+        }
+    }
+    fn solve(&mut self) {
+        while !self.valid() {
+            for row in self.rows_mut() {
+                solve_first_order(row);
+            }
+            println!("{:?}", self);
+            for row in self.rows_mut() {
+                solve_first_order(row.into_iter().rev());
+            }
+            println!("{:?}", self);
+            for block in self.blocks_mut() {
+                solve_first_order(block);
+            }
+            println!("{:?}", self);
+            for block in self.blocks_mut() {
+                solve_first_order(block.into_iter().rev());
+            }
+            println!("{:?}", self);
+            for col in self.columns_mut() {
+                solve_first_order(col);
+            }
+            println!("{:?}", self);
+            for col in self.columns_mut() {
+                solve_first_order(col.into_iter().rev());
+            }
+            println!("{:?}", self);
+        }
+    }
     fn new() -> Self {
         Self([Default::default(); 81])
     }
-    fn blocks(&self) -> Blocks<'_> {
+    fn blocks(&self) -> Blocks<&'_ Cell> {
         let mut blocks = Blocks::new();
         for (c, elt) in self.0.iter().enumerate() {
-            let block = which_block(c);
-            blocks.add_to_block(block, elt);
+            blocks.add_with_oracle(
+                |_| {
+                    let (row, col) = row_column(c);
+                    3 * (row / 3) + col / 3
+                },
+                elt,
+            );
         }
         blocks
     }
-    fn blocks_mut(&mut self) -> BlocksMut<'_> {
-        let mut blocks_mut = BlocksMut::new();
+    fn blocks_mut(&mut self) -> Blocks<&'_ mut Cell> {
+        let mut blocks_mut = Blocks::new();
         for (c, elt) in self.0.iter_mut().enumerate() {
-            let block = which_block(c);
-            blocks_mut.add_to_block(block, elt);
+            blocks_mut.add_with_oracle(
+                |_| {
+                    let (row, col) = row_column(c);
+                    3 * (row / 3) + col / 3
+                },
+                elt,
+            );
         }
         blocks_mut
     }
-    fn rows_mut(&mut self) -> RowsMut<'_> {
-        let mut rows_mut = RowsMut::new();
-        for (c, elt) in self.0.iter_mut().enumerate() {
-            let row = which_row(c);
-            rows_mut.add_to_row(row, elt);
-        }
-        rows_mut
-    }
-    fn rows(&self) -> Rows<'_> {
+    fn rows(&self) -> Rows<&'_ Cell> {
         let mut rows = Rows::new();
         for (c, elt) in self.0.iter().enumerate() {
-            let row = which_row(c);
-            rows.add_to_row(row, elt);
+            rows.add_with_oracle(
+                |_| {
+                    let (row, _) = row_column(c);
+                    row
+                },
+                elt,
+            );
         }
         rows
     }
-    fn columns_mut(&mut self) -> ColumnsMut<'_> {
-        let mut columns_mut = ColumnsMut::new();
+    fn rows_mut(&mut self) -> Rows<&'_ mut Cell> {
+        let mut rows_mut = Rows::new();
         for (c, elt) in self.0.iter_mut().enumerate() {
-            let col = which_column(c);
-            columns_mut.add_to_column(col, elt);
+            rows_mut.add_with_oracle(
+                |_| {
+                    let (row, _) = row_column(c);
+                    row
+                },
+                elt,
+            );
+        }
+        rows_mut
+    }
+    fn columns(&self) -> Columns<&'_ Cell> {
+        let mut columns = Columns::new();
+        for (c, elt) in self.0.iter().enumerate() {
+            columns.add_with_oracle(
+                |_| {
+                    let (_, col) = row_column(c);
+                    col
+                },
+                elt,
+            );
+        }
+        columns
+    }
+    fn columns_mut(&mut self) -> Columns<&'_ mut Cell> {
+        let mut columns_mut = Columns::new();
+        for (c, elt) in self.0.iter_mut().enumerate() {
+            columns_mut.add_with_oracle(
+                |_| {
+                    let (_, col) = row_column(c);
+                    col
+                },
+                elt,
+            );
         }
         columns_mut
     }
@@ -165,6 +422,7 @@ impl Sudoku {
         check == 0b1_1111_1111
     }
 }
+
 impl Default for Sudoku {
     fn default() -> Self {
         Self::new()
@@ -200,10 +458,9 @@ impl std::str::FromStr for Sudoku {
 
     fn from_str(string: &str) -> Result<Self, Self::Err> {
         let mut sudoku = Sudoku::new();
-        // let space = " ".to_string();
         for (r, row) in string.split('\n').enumerate() {
             for (c, ch) in row.chars().enumerate() {
-                if ch == ' ' {
+                if ch == 'X' {
                     continue;
                 } else {
                     let value = ch.to_string().parse()?;
@@ -269,30 +526,20 @@ fn column(n: usize) -> impl Iterator<Item = (usize, usize)> {
     (0..9).map(move |row| (row, n))
 }
 fn block(n: usize) -> impl Iterator<Item = (usize, usize)> {
-    let first = 27 * (n/3) + 3*(n%3);
+    let first = 27 * (n / 3) + 3 * (n % 3);
     (first..first + 3)
         .chain(first + 9..(first + 3) + 9)
         .chain(first + 18..(first + 3) + 18)
         .map(row_column)
 }
-fn which_block(idx: usize) -> usize {
-    let (row, col) = row_column(idx);
-    3 * (row / 3) + col / 3
-}
-fn which_row(idx: usize) -> usize {
-    let (row, _) = row_column(idx);
-    row
-}
-fn which_column(idx: usize) -> usize {
-    let (_, col) = row_column(idx);
-    col
-}
 
-#[derive(Debug)]
-struct Blocks<'a>(Vec<Vec<&'a Cell>>);
-#[derive(Debug)]
-struct BlocksMut<'a>(Vec<Vec<&'a mut Cell>>);
-impl<'a,> Blocks<'a> {
+type Rows<T> = GroupsOf<T>;
+type Blocks<T> = GroupsOf<T>;
+type Columns<T> = GroupsOf<T>;
+
+#[derive(Clone, Debug)]
+struct GroupsOf<T>(Vec<Vec<T>>);
+impl<T> GroupsOf<T> {
     fn new() -> Self {
         let mut empty = vec![];
         for _ in 0..9 {
@@ -300,110 +547,23 @@ impl<'a,> Blocks<'a> {
         }
         Self(empty)
     }
-    fn add_to_block(&mut self, block: usize, elt: &'a Cell) {
-        self.0[block].push(elt);
+    fn add_with_oracle(&mut self, oracle: impl Fn(&T) -> usize, elt: T) {
+        let group = oracle(&elt);
+        self.0[group].push(elt);
     }
 }
-impl<'a> BlocksMut<'a> {
-    fn new() -> Self {
-        let mut empty = vec![];
-        for _ in 0..9 {
-            empty.push(vec![]);
-        }
-        Self(empty)
-    }
-    fn add_to_block(&mut self, block: usize, elt: &'a mut Cell) {
-        self.0[block].push(elt);
-    }
-}
-struct Rows<'a>(Vec<Vec<&'a Cell>>);
-impl<'a> Rows<'a> {
-    fn new() -> Self {
-        let mut empty = vec![];
-        for _ in 0..9 {
-            empty.push(vec![]);
-        }
-        Self(empty)
-    }
-    fn add_to_row(&mut self, row: usize, elt: &'a Cell) {
-        self.0[row].insert(0, elt);
-    }
-}
-struct RowsMut<'a>(Vec<Vec<&'a mut Cell>>);
-impl<'a> RowsMut<'a> {
-    fn new() -> Self {
-        let mut empty = vec![];
-        for _ in 0..9 {
-            empty.push(vec![]);
-        }
-        Self(empty)
-    }
-    fn add_to_row(&mut self, row: usize, elt: &'a mut Cell) {
-        self.0[row].insert(0, elt);
-    }
-}
-struct ColumnsMut<'a>(Vec<Vec<&'a mut Cell>>);
-impl<'a> ColumnsMut<'a> {
-    fn new() -> Self {
-        let mut empty = vec![];
-        for _ in 0..9 {
-            empty.push(vec![]);
-        }
-        Self(empty)
-    }
-    fn add_to_column(&mut self, column: usize, elt: &'a mut Cell) {
-        self.0[column].insert(0, elt);
-    }
-}
-impl<'a> Iterator for Blocks<'a> {
-    type Item = Vec<&'a Cell>;
+impl<T> Iterator for GroupsOf<T> {
+    type Item = Vec<T>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.0.len() != 0 {
-            Some(self.0.remove(0))
-        } else {
+        if self.0.is_empty() {
             None
+        } else {
+            Some(self.0.remove(0))
         }
     }
 }
 
-impl<'a> Iterator for BlocksMut<'a> {
-    type Item = Vec<&'a mut Cell>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.0.len() != 0 {
-           Some(self.0.remove(0))
-        } else {
-            None
-        }
-    }
-}
-impl<'a> Iterator for RowsMut<'a> {
-    type Item = Vec<&'a mut Cell>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.0.len() != 0 {
-            Some(self.0.remove(0))
-        } else {
-            None
-        }
-    }
-}
-impl<'a> Iterator for Rows<'a> {
-    type Item = Vec<&'a Cell>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.0.len() != 0 {
-            Some(self.0.remove(0))
-        } else {
-            None
-        }
-    }
-}
-impl<'a> Iterator for ColumnsMut<'a> {
-    type Item = Vec<&'a mut Cell>;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.pop()
-    }
-}
-
-fn solve_first_order<'a,I: IntoIterator<Item = &'a mut Cell>>(refs: I) {
+fn solve_first_order<'a, I: IntoIterator<Item = &'a mut Cell>>(refs: I) {
     let mut carry = 0_u16;
     for elt in refs {
         elt.0 &= !carry;
@@ -417,8 +577,80 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
-    fn map_to_integers<'a>(refs: Vec<&'a mut Cell>) -> Vec<u8> {
-        refs.into_iter().map(|cell| &*cell).cloned().map(|cell| cell.value().unwrap().0 + 1).collect()
+    #[test]
+    fn test_rules() {
+        let mut sudoku: Sudoku = "X34678X12\n\
+                              6721X5348\n\
+                              19X342567\n\
+                              859761X23\n\
+                              4268X3791\n\
+                              7X3924856\n\
+                              9615372X4\n\
+                              287419635\n\
+                              345286179"
+            .parse()
+            .unwrap();
+        let row = vec![Cell(0b1111), Cell(0b1111), Cell(0b11), Cell(0b11)];
+        assert_eq!(matches_rule1(4, 2, row.iter().collect()), vec![Cell(0b11)]);
+        let mut row = vec![
+            Cell(0b1_1111_1111),
+            Cell(0b100),
+            Cell(0b1000),
+            Cell(0b10_0000),
+            Cell(0b0100_0000),
+            Cell(0b1000_0000),
+            Cell(0b1_1111_1111),
+            Cell(0b1),
+            Cell(0b10),
+        ];
+        let matches = matches_rule1(9, 1, row.iter().collect());
+        assert_eq!(
+            matches,
+            vec![
+                Cell(0b1),
+                Cell(0b10),
+                Cell(0b100),
+                Cell(0b1000),
+                Cell(0b10_0000),
+                Cell(0b0100_0000),
+                Cell(0b1000_0000),
+            ]
+        );
+        for elt in row.iter_mut().rev() {
+            // let (pattern1,pattern2) = patterns_per_row.pop().unwrap();
+            for p1 in matches.iter() {
+                // remove all elements not in p1 from the elements that don't match p1
+                if p1 != elt {
+                    *elt = Cell(elt.0 & !p1.0);
+                }
+            }
+        }
+        dbg!(row);
+        println!("{:?}", sudoku);
+        sudoku.solve_order(1);
+        println!("{:?}", sudoku);
+        sudoku.solve_order(1);
+        println!("{:?}", sudoku);
+        assert!(sudoku.not_invalid_group(column(0)));
+    }
+    #[test]
+    fn test_choose() {
+        // let chosen = Choose::new(1);
+        // for elt in chosen {
+        //     dbg!(elt);
+        // }
+        let chosen = choose(9, 2).collect::<Vec<_>>();
+        for elt in chosen {
+            println!("{:8b}", elt);
+        }
+        // println!("{:b}",choose_one);
+    }
+    fn map_to_integers(refs: Vec<&mut Cell>) -> Vec<u8> {
+        refs.into_iter()
+            .map(|cell| &*cell)
+            .cloned()
+            .map(|cell| cell.value().unwrap().0 + 1)
+            .collect()
     }
     use super::*;
 
@@ -456,8 +688,11 @@ mod tests {
             .parse()
             .unwrap();
         let mut blocks = sudoku.blocks_mut();
-        println!("{:?}",blocks);
-        assert_eq!(map_to_integers(blocks.next().unwrap()),vec![5,3,4,6,7,2,1,9,8]);
+        println!("{:?}", blocks);
+        assert_eq!(
+            map_to_integers(blocks.next().unwrap()),
+            vec![5, 3, 4, 6, 7, 2, 1, 9, 8]
+        );
     }
 
     #[test]
@@ -473,77 +708,53 @@ mod tests {
                               345286179"
             .parse()
             .unwrap();
-        // println!("{}", sudoku);
-        // assert!(sudoku.validate_group(column(0)));
-        // assert!(sudoku.validate_group(column(1)));
-        // assert!(sudoku.validate_group(column(2)));
-        // println!("{:?}", sudoku.blocks().0[4]);
-        // assert!(sudoku.validate_group(block(4)));
         assert!(sudoku.valid());
-
     }
     #[test]
     fn test_not_invalid_sudoku() {
-        let sudoku: Sudoku = " 34678 12\n\
-                              6721 5348\n\
-                              19 342567\n\
-                              859761 23\n\
-                              4268 3791\n\
-                              7 3924856\n\
-                              9615372 4\n\
+        let sudoku: Sudoku = "X34678X12\n\
+                              6721X5348\n\
+                              19X342567\n\
+                              859761X23\n\
+                              4268X3791\n\
+                              7X3924856\n\
+                              9615372X4\n\
                               287419635\n\
                               345286179"
             .parse()
             .unwrap();
-        println!("{}", sudoku);
         assert!(sudoku.not_invalid_group(column(0)));
     }
     #[test]
     fn test_solve_sudoku() {
-        let mut sudoku: Sudoku = " 34678 12\n\
-                              6721 5348\n\
-                              19 342567\n\
-                              859761 23\n\
-                              4268 3791\n\
-                              7 3924856\n\
-                              9615372 4\n\
-                              287419635\n\
-                              345286179"
+        let mut sudoku: Sudoku = "X34678X12\n\
+                                  6721X5348\n\
+                                  19X342567\n\
+                                  X59X61X23\n\
+                                  42X8X3791\n\
+                                  7X3924X56\n\
+                                  9615372X4\n\
+                                  287X1963X\n\
+                                  X45286X79"
             .parse()
             .unwrap();
-        for row in sudoku.rows_mut() {
-            solve_first_order(row.into_iter().rev());
-        }
-        println!("{:?}", sudoku);
-        for row in sudoku.rows_mut() {
-            solve_first_order(row);
-        }
-        for row in sudoku.rows_mut() {
-            solve_first_order(row.into_iter().rev());
-        }
-        for block in sudoku.blocks_mut() {
-            solve_first_order(block);
-        }
-        for col in sudoku.columns_mut() {
-            solve_first_order(col);
-        }
-        println!("{:?}", sudoku);
+        sudoku.solve();
         assert!(sudoku.valid());
     }
     #[test]
     fn test_row_column() {
-        assert_eq!(row_column(0),(0,0));
-        assert_eq!(row_column(1),(0,1));
-        assert_eq!(row_column(2),(0,2));
-        assert_eq!(row_column(3),(0,3));
-        assert_eq!(row_column(4),(0,4));
-        assert_eq!(row_column(5),(0,5));
-        assert_eq!(row_column(9),(1,0));
+        assert_eq!(row_column(0), (0, 0));
+        assert_eq!(row_column(1), (0, 1));
+        assert_eq!(row_column(2), (0, 2));
+        assert_eq!(row_column(3), (0, 3));
+        assert_eq!(row_column(4), (0, 4));
+        assert_eq!(row_column(5), (0, 5));
+        assert_eq!(row_column(9), (1, 0));
     }
     #[test]
     fn test_which_block() {
-        assert_eq!(which_block(0),0);
-        assert_eq!(which_block(10),0);
-        assert_eq!(which_block(1),0);
+        assert_eq!(which_block(0), 0);
+        assert_eq!(which_block(10), 0);
+        assert_eq!(which_block(1), 0);
     }
 }
