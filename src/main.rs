@@ -1,10 +1,49 @@
 #![allow(dead_code)]
-#![allow(unused_imports)]
+use rand::distributions::Distribution;
+use rand::seq::SliceRandom;
+use rand::Rng;
 use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::num::ParseIntError;
-use std::ops::Not;
 use thiserror::Error;
+
+const SUDOKU: &str = "534678912\n\
+                      672195348\n\
+                      198342567\n\
+                      859761423\n\
+                      426853791\n\
+                      713924856\n\
+                      961537284\n\
+                      287419635\n\
+                      345286179";
+
+#[derive(Debug, Clone)]
+struct Permutation(Vec<usize>);
+#[derive(Debug, Clone)]
+struct SymmetricGroup {
+    size: usize,
+}
+#[derive(Debug, Clone)]
+struct Sudokus;
+
+impl Distribution<Permutation> for SymmetricGroup {
+    fn sample<R: ?Sized + Rng>(&self, rng: &mut R) -> Permutation {
+        let mut sigma: Vec<_> = (1..=self.size).collect();
+        sigma.shuffle(rng);
+        assert!(sigma.len() == 9);
+        Permutation(sigma)
+    }
+}
+
+
+#[derive(Debug, Error)]
+struct UnsolvableWithRules;
+
+impl std::fmt::Display for UnsolvableWithRules {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <Self as Debug>::fmt(self, f)
+    }
+}
 
 fn which_block(idx: usize) -> usize {
     let (row, col) = row_column(idx);
@@ -129,14 +168,18 @@ impl PartialOrd for Cell {
         None
     }
 }
-impl Not for Cell {
-    type Output = Cell;
-    fn not(self) -> Self {
-        Cell(!self.0)
-    }
-}
 
 impl Cell {
+    fn permute(&mut self, sigma: &Permutation) {
+        let mut replacement = 0u16;
+        let bitmask = 1u16;
+        for n in 0..9 {
+            if bitmask << n & self.0 != 0 {
+                replacement |= bitmask << (sigma.0[n] - 1);
+            }
+        }
+        self.0 = replacement;
+    }
     fn new() -> Self {
         Self(0b1_1111_1111)
     }
@@ -233,65 +276,98 @@ fn matches_rule2(n: usize, k: usize, row: Vec<&Cell>) -> Vec<Cell> {
 }
 #[derive(Clone)]
 struct Sudoku([Cell; 81]);
+
+impl PartialEq for Sudoku {
+    fn eq(&self, other: &Sudoku) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
 impl Sudoku {
-    fn solve_order(&mut self, k: usize) {
-        let mut patterns_per_row = vec![];
-        for row in self.rows() {
-            patterns_per_row.push(matches_rule1(9, k, row));
+    // returns a Sudoku with this many erased fields
+    fn erased(amount: usize) -> Self {
+        let mut sudoku = Sudoku::random();
+        for _ in 0..amount {
+            sudoku.erase();
         }
-        // println!("{:?}", patterns_per_row.pop());
-        for (row, pattern) in self.rows_mut().zip(patterns_per_row) {
-            for elt in row.into_iter().rev() {
-                for p in pattern.iter() {
-                    // remove all elements not in p1 from the elements that don't match p1
-                    if p != elt {
-                        *elt = Cell(elt.0 & !p.0);
+        sudoku
+    }
+    fn random() -> Self {
+        let mut rng = rand::thread_rng();
+        let perm = SymmetricGroup { size: 9 }.sample(&mut rng);
+        let mut sudoku: Sudoku = SUDOKU.parse().unwrap();
+        sudoku.permute(&perm);
+        sudoku
+    }
+    // erase one more field at random
+    fn erase(&mut self) {
+        let dist = rand::distributions::Uniform::new(0,81);
+        let mut rng = rand::thread_rng();
+        loop {
+        let index = dist.sample(&mut rng);
+            if self.0[index] == Cell::default() {
+                continue;
+            } else {
+                self.0[index] = Cell::default();
+                return;
+            }
+        }
+    }
+    fn permute(&mut self, sigma: &Permutation) {
+        for cell in self.0.iter_mut() {
+            cell.permute(sigma);
+        }
+    }
+    fn iter(&self) -> impl Iterator<Item = &Cell> {
+        self.0.iter()
+    }
+    fn solve_order(&mut self, k: usize) {
+        let iter_fn = [Sudoku::rows, Sudoku::columns, Sudoku::blocks];
+        let iter_mut_fn = [Sudoku::rows_mut, Sudoku::columns_mut, Sudoku::blocks_mut];
+        for (it_fn, it_mut_fn) in iter_fn.iter().zip(&iter_mut_fn) {
+            let mut patterns = vec![];
+            for part in it_fn(self) {
+                patterns.push(matches_rule1(9, k, part));
+            }
+            for (part, pattern) in it_mut_fn(self).zip(patterns) {
+                for elt in part.into_iter().rev() {
+                    for p in pattern.iter() {
+                        // remove all elements not in p1 from the elements that don't match p1
+                        if p != elt {
+                            *elt = Cell(elt.0 & !p.0);
+                        }
                     }
                 }
             }
-        }
-        let mut patterns_per_row = vec![];
-        for row in self.rows() {
-            patterns_per_row.push(matches_rule2(9, k, row));
-        }
-        for (row, pattern) in self.rows_mut().zip(patterns_per_row) {
-            for elt in row.into_iter().rev() {
-                for p in pattern.iter() {
-                    // remove all other elements but the ones in pattern p2
-                    if p <= elt {
-                        *elt = Cell(elt.0 & p.0);
+            let mut patterns = vec![];
+            for part in it_fn(self) {
+                patterns.push(matches_rule2(9, k, part));
+            }
+            for (part, pattern) in it_mut_fn(self).zip(patterns) {
+                for elt in part.into_iter().rev() {
+                    for p in pattern.iter() {
+                        // remove all other elements but the ones in pattern p2
+                        if p <= elt {
+                            *elt = Cell(elt.0 & p.0);
+                        }
                     }
                 }
             }
         }
     }
-    fn solve(&mut self) {
+    fn solve(&mut self) -> Result<(), UnsolvableWithRules> {
         while !self.valid() {
-            for row in self.rows_mut() {
-                solve_first_order(row);
+            let before = self.clone();
+            for k in 1..=9 {
+                self.solve_order(k);
+                if *self != before {
+                    break;
+                }
             }
-            println!("{:?}", self);
-            for row in self.rows_mut() {
-                solve_first_order(row.into_iter().rev());
+            if *self == before {
+                return Err(UnsolvableWithRules);
             }
-            println!("{:?}", self);
-            for block in self.blocks_mut() {
-                solve_first_order(block);
-            }
-            println!("{:?}", self);
-            for block in self.blocks_mut() {
-                solve_first_order(block.into_iter().rev());
-            }
-            println!("{:?}", self);
-            for col in self.columns_mut() {
-                solve_first_order(col);
-            }
-            println!("{:?}", self);
-            for col in self.columns_mut() {
-                solve_first_order(col.into_iter().rev());
-            }
-            println!("{:?}", self);
         }
+        Ok(())
     }
     fn new() -> Self {
         Self([Default::default(); 81])
@@ -563,20 +639,55 @@ impl<T> Iterator for GroupsOf<T> {
     }
 }
 
-fn solve_first_order<'a, I: IntoIterator<Item = &'a mut Cell>>(refs: I) {
-    let mut carry = 0_u16;
-    for elt in refs {
-        elt.0 &= !carry;
-        if elt.is_final() {
-            carry |= elt.0;
-        }
-    }
-}
-
 fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // #[test]
+    // fn test_generate_permutation() {
+    //     let mut collected = vec![vec![];9];
+    //     let n = 10000;
+    //     for _ in 0..n {
+    //         for (i,r) in generate_permutation().into_iter().enumerate() {
+    //             collected[i].push(r);
+    //         }
+    //         // collected[]generate_permutation().iter());
+    //     }
+    //     // collected.sort_by(|(i1, v1), (i2, v2)| i1.cmp(i2).then(v1.cmp(v2)));
+    //     let mut stat = HashMap::new();
+    //     for elt in collected {
+    //         match stat.get_mut(&elt) {
+    //             None => {
+    //                 stat.insert(elt, 1);
+    //             }
+    //             Some(mut_ref) => {
+    //                 *mut_ref += 1;
+    //             }
+    //         }
+    //     }
+    //     let occurrences: Vec<_> = stat
+    //         .into_iter()
+    //         .map(|(_key, val)| val as f64 / n as f64)
+    //         .collect();
+    //     dbg!(occurrences);
+    // }
+    #[test]
+    fn test_generate_sudoku() {
+        dbg!(Sudoku::random());
+    }
+    #[test]
+    fn test_generate_erased_sudoku() {
+        let sudoku = Sudoku::erased(5);
+        dbg!(sudoku);
+    }
+    #[test]
+    fn test_eq() {
+        let s1 = Sudoku::default();
+        let s2 = Sudoku::default();
+        assert_eq!(s1, s2);
+        let s2: Sudoku = "123".parse().unwrap();
+        assert!(!(s1 == s2));
+    }
     #[test]
     fn test_rules() {
         let mut sudoku: Sudoku = "X34678X12\n\
@@ -635,10 +746,6 @@ mod tests {
     }
     #[test]
     fn test_choose() {
-        // let chosen = Choose::new(1);
-        // for elt in chosen {
-        //     dbg!(elt);
-        // }
         let chosen = choose(9, 2).collect::<Vec<_>>();
         for elt in chosen {
             println!("{:8b}", elt);
@@ -676,19 +783,8 @@ mod tests {
 
     #[test]
     fn test_blocks_mut() {
-        let mut sudoku: Sudoku = "534678912\n\
-                                  672195348\n\
-                                  198342567\n\
-                                  859761423\n\
-                                  426853791\n\
-                                  713924856\n\
-                                  961537284\n\
-                                  287419635\n\
-                                  345286179"
-            .parse()
-            .unwrap();
+        let mut sudoku: Sudoku = SUDOKU.parse().unwrap();
         let mut blocks = sudoku.blocks_mut();
-        println!("{:?}", blocks);
         assert_eq!(
             map_to_integers(blocks.next().unwrap()),
             vec![5, 3, 4, 6, 7, 2, 1, 9, 8]
@@ -697,17 +793,7 @@ mod tests {
 
     #[test]
     fn test_validate_sudoku() {
-        let sudoku: Sudoku = "534678912\n\
-                              672195348\n\
-                              198342567\n\
-                              859761423\n\
-                              426853791\n\
-                              713924856\n\
-                              961537284\n\
-                              287419635\n\
-                              345286179"
-            .parse()
-            .unwrap();
+        let sudoku: Sudoku = SUDOKU.parse().unwrap();
         assert!(sudoku.valid());
     }
     #[test]
@@ -726,6 +812,21 @@ mod tests {
         assert!(sudoku.not_invalid_group(column(0)));
     }
     #[test]
+    fn test_unsolvable_sudoku() {
+        let mut sudoku: Sudoku = "XXXXXXX12\n\
+                                  6721XX348\n\
+                                  19X34X567\n\
+                                  X59X6XX23\n\
+                                  42X8XX791\n\
+                                  7X392XX5X\n\
+                                  96153X2X4\n\
+                                  287X1X63X\n\
+                                  XXXXXXX7X"
+            .parse()
+            .unwrap();
+        assert!(sudoku.solve().is_err());
+    }
+    #[test]
     fn test_solve_sudoku() {
         let mut sudoku: Sudoku = "X34678X12\n\
                                   6721X5348\n\
@@ -738,7 +839,7 @@ mod tests {
                                   X45286X79"
             .parse()
             .unwrap();
-        sudoku.solve();
+        sudoku.solve().expect("Should be solveable.");
         assert!(sudoku.valid());
     }
     #[test]
